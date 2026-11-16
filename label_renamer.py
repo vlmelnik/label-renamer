@@ -164,9 +164,14 @@ def pick_suffix(words, prefix):
                 prefix.endswith(tok[:k]) for k in range(2, len(tok) + 1)):
             continue
         label = join_prefix(prefix, tok)
-        if label and (not best or height > best[0]):
-            best = (height, label, text)
-    return (best[1], best[2]) if best else (None, None)
+        if not label:
+            continue
+        pure = tok.isdigit() or tok.startswith(prefix) or any(
+            prefix.endswith(tok[:k]) and tok[k:].isdigit() for k in range(1, len(tok)))
+        key = (pure, height)
+        if not best or key > best[0]:
+            best = (key, label, text)
+    return (best[1], best[2], best[0][0]) if best else (None, None, False)
 
 
 def windows_ocr(img):
@@ -279,7 +284,7 @@ def find_text(path, prefix="", ocr=None, debug=False):
     except Exception as e:  # noqa: BLE001
         return None, f"Bild nicht lesbar: {e}"
     seen = []
-    suffix = None
+    suffix = None  # (Label, Fundstelle); reine Ziffern schlagen korrigierte Buchstaben (z. B. "Oss")
     try:
         variants = [("ganz", base)]
         for i, box in enumerate(find_stickers(base)):
@@ -293,16 +298,18 @@ def find_text(path, prefix="", ocr=None, debug=False):
                 label = pick_label(lines, prefix)
                 if label:
                     return label, OCR_HINT
-                if prefix and not suffix:
-                    suffix, raw = pick_suffix(words, prefix)
-                    if suffix and debug:
-                        seen.append(f"{name}/{angle}°: Marker gelesen als '{raw}'; Zeilen: " + " | ".join(lines))
-            if suffix:
+                if prefix:
+                    cand, raw, pure = pick_suffix(words, prefix)
+                    if cand and (not suffix or (pure and not suffix[2])):
+                        suffix = (cand, f"{name}/{angle}°: Marker gelesen als '{raw}'", pure)
+                    if suffix and suffix[2]:
+                        break
+            if suffix and suffix[2]:
                 break
     except Exception as e:  # noqa: BLE001
         return None, f"Texterkennung fehlgeschlagen: {e}"
     if suffix:
-        return suffix, PREFIX_HINT + (" [" + " || ".join(seen[-1:]) + "]" if debug else "")
+        return suffix[0], PREFIX_HINT + (f" [{suffix[1]}]" if debug else "")
     msg = "weder QR-Code, Labeltext noch Marker-Ziffern gefunden" if prefix else "weder QR-Code noch Labeltext gefunden"
     if debug:
         msg += " [OCR: " + (" || ".join(seen) or "nichts gelesen") + "]"
