@@ -91,6 +91,18 @@ def unique_target(folder, label, ext, src, taken):
         n += 1
 
 
+def rename_with_retry(src, dst):
+    """Kurz erneut versuchen, falls Virenscanner/OneDrive die Datei gerade sperrt."""
+    for attempt in range(4):
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            if attempt == 3:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
 def pause():
     if getattr(sys, "frozen", False):
         try:
@@ -156,7 +168,7 @@ def main():
 
     print()
     log = []
-    renamed = failed = 0
+    renamed = failed = denied = 0
     taken = set()
     for f in files:  # nacheinander umbenennen, damit Duplikate sauber nummeriert werden
         lab, info = results[f]
@@ -175,17 +187,29 @@ def main():
             continue
         if not args.dry_run:
             try:
-                os.rename(f, target)
+                rename_with_retry(f, target)
+            except PermissionError:
+                denied += 1
+                log.append(f"ZUGRIFF VERWEIGERT\t{base}\t-> {new} (Label erkannt, aber Windows erlaubt das Umbenennen nicht)")
+                continue
             except OSError as e:
-                failed += 1
-                log.append(f"FEHLER\t{base}\t{e}")
+                denied += 1
+                log.append(f"FEHLER\t{base}\t-> {new}: {e}")
                 continue
         renamed += 1
         log.append(f"UMBENANNT\t{base}\t-> {new}{note}")
 
     for line in log:
         print(line.replace("\t", "  "))
-    print(f"\n{renamed} umbenannt, {failed} nicht erkannt, {time.time() - t0:.1f} s")
+    print(f"\n{renamed} umbenannt, {failed} nicht erkannt, {denied} nicht umbenennbar, {time.time() - t0:.1f} s")
+    if denied:
+        print(
+            "\nHinweis: Windows hat das Umbenennen blockiert. Häufigste Ursache auf Firmen-PCs ist der\n"
+            "'Überwachte Ordnerzugriff' (Ransomware-Schutz), der fremden Programmen Änderungen in\n"
+            "Bilder/Dokumente/Desktop verbietet. Lösung: Fotos in einen anderen Ordner legen\n"
+            "(z. B. C:\\Temp\\Fotos oder das Netzlaufwerk) oder die IT um eine Freigabe bitten.\n"
+            "Außerdem prüfen, ob die Dateien noch in einem anderen Programm geöffnet sind."
+        )
 
     if not args.dry_run:
         try:
@@ -194,7 +218,7 @@ def main():
         except OSError:
             pass
     pause()
-    return 0 if failed == 0 else 2
+    return 0 if failed == 0 and denied == 0 else 2
 
 
 if __name__ == "__main__":
