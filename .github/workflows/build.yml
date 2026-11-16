@@ -23,16 +23,20 @@ jobs:
           pip install -r requirements.txt pyinstaller
       - name: Build
         run: >
-          pyinstaller --onefile --console --name LabelRenamer
-          --collect-all zxingcpp --collect-all pillow_heif
+          pyinstaller --onefile --windowed --name LabelRenamer
+          --collect-all zxingcpp --collect-all pillow_heif --collect-all winrt
           label_renamer.py
       - name: Smoke test
         shell: pwsh
         run: |
           New-Item -ItemType Directory test | Out-Null
           Copy-Item tests/sample.jpg test/IMG_0001.jpg
-          ./dist/LabelRenamer.exe test
-          if (-not (Test-Path test/F08874ID0109.jpg)) { Get-ChildItem test; exit 1 }
+          Copy-Item tests/sample_noqr.jpg test/IMG_0002.jpg
+          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test","--headless","--report","report.txt" -Wait
+          Get-Content report.txt
+          Get-ChildItem test
+          if (-not (Test-Path test/F08874ID0109.jpg)) { Write-Error "QR-Erkennung fehlgeschlagen"; exit 1 }
+          if (-not (Test-Path test/F08874ID0109_2.jpg)) { Write-Error "Text-Erkennung (OCR) fehlgeschlagen"; exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: LabelRenamer
