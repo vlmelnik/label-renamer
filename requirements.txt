@@ -3,10 +3,5 @@ pillow>=10.0
 pillow-heif>=0.16
 numpy>=1.24
 sv-ttk>=2.6
-winrt-runtime>=2.0; sys_platform == "win32"
-winrt-Windows.Foundation>=2.0; sys_platform == "win32"
-winrt-Windows.Foundation.Collections>=2.0; sys_platform == "win32"
-winrt-Windows.Globalization>=2.0; sys_platform == "win32"
-winrt-Windows.Graphics.Imaging>=2.0; sys_platform == "win32"
-winrt-Windows.Media.Ocr>=2.0; sys_platform == "win32"
-winrt-Windows.Storage.Streams>=2.0; sys_platform == "win32"
+rapidocr_onnxruntime>=1.4,<2
+onnxruntime>=1.17

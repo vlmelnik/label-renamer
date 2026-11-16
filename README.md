@@ -2,7 +2,7 @@
 
 Kleines portables Windows-Programm: erkennt auf Fotos die Labelnummer der Platine und benennt jede Datei danach um, z. B. `IMG_4711.jpg` → `F08874ID0109.jpg`.
 
-- Erkennung zuerst über den **QR-Code** auf dem Label. Gibt es keinen, wird der **Text auf dem Label** gelesen (eingebaute Windows-Texterkennung). Solche Treffer sind in der Ergebnisliste gelb markiert und sollten kurz geprüft werden.
+- Erkennung zuerst über den **QR-Code** auf dem Label. Gibt es keinen, wird der **Text auf dem Label** gelesen (PP-OCR, liest auch Handschrift). Solche Treffer sind in der Ergebnisliste gelb markiert und sollten kurz geprüft werden.
 - Mehrere Bilder werden parallel verarbeitet, große Fotos (40–50 MB) inklusive
 - Dateinamen nur aus Großbuchstaben und Ziffern
 - Formate: JPG, PNG, HEIC, TIFF, BMP, WEBP
@@ -35,7 +35,8 @@ Ist das Label abgeklebt und die Nummer nur teilweise mit Marker daraufgeschriebe
 
 ```
 pip install -r requirements.txt pyinstaller
-pyinstaller --onefile --windowed --name LabelRenamer --collect-all zxingcpp --collect-all pillow_heif --collect-all winrt --collect-all sv_ttk label_renamer.py
+pip uninstall -y opencv-python && pip install --no-deps opencv-python-headless
+pyinstaller --onefile --windowed --name LabelRenamer --collect-all zxingcpp --collect-all pillow_heif --collect-all sv_ttk --collect-all rapidocr_onnxruntime --collect-binaries onnxruntime label_renamer.py
 ```
 
 Bei jedem Push auf `main` baut GitHub Actions die exe, testet QR- und Texterkennung unter Windows und veröffentlicht sie als Release.

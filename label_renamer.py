@@ -1,6 +1,6 @@
 """LabelRenamer - benennt Fotos nach der Labelnummer um.
 
-Erkennung: zuerst QR-Code auf dem Label, sonst Texterkennung (Windows-OCR).
+Erkennung: zuerst QR-Code auf dem Label, sonst Texterkennung (PP-OCR über RapidOCR).
 Start:  Doppelklick -> Fenster, Ordner wählen, Start.
         Ordner auf die exe ziehen -> Ordner ist vorausgewählt.
 Test:   LabelRenamer.exe <Ordner> --headless [--report datei.txt]
@@ -32,7 +32,6 @@ EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".bmp"
 # Labelnummer: nur Großbuchstaben und Ziffern, mindestens ein Buchstabe, z. B. F08874ID0109
 LABEL_RE = re.compile(r"^(?=.*[A-Z])[A-Z0-9]{6,40}$")
 # typisches Format der Labels: 1 Buchstabe, 5 Ziffern, 2 Buchstaben, 4 Ziffern
-FORMAT = "LDDDDDLLDDDD"
 SCALES = (2400, 4000, None)  # längste Kante in px; None = volle Auflösung
 OCR_HINT = "per Text erkannt (kein QR-Code) – bitte prüfen"
 PREFIX_HINT = "Präfix + handschriftliche Ziffern – bitte prüfen"
@@ -86,48 +85,47 @@ def find_qr(path):
 
 # --------------------------------------------------------------------------- Text (OCR)
 
-TO_DIGIT = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "|": "1", "Z": "2", "S": "5", "B": "8", "G": "6", "T": "7"}
+TO_DIGIT = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "|": "1", "Z": "2", "S": "5", "B": "8",
+            "G": "6", "T": "7"}
 TO_LETTER = {"0": "O", "1": "I", "2": "Z", "5": "S", "8": "B", "6": "G"}
+# handschriftliche Kleinbuchstaben, die eigentlich Ziffern sind
+HAND = {"g": "9", "q": "9", "b": "6", "o": "0", "l": "1", "s": "5", "z": "2", "i": "1"}
+FORMATS = ("LDDDDDLLDDDD", "LDDDDDLLDDDDD")  # z. B. F08874ID0109, F08482ID00540
+OCR_MAX_SIDE = 2400
+_ENGINE = None
+
+
+def to_kind(ch, kind):
+    if kind == "D":
+        return ch if ch.isdigit() else TO_DIGIT.get(ch)
+    return ch if ch.isalpha() else TO_LETTER.get(ch)
 
 
 def fit_format(tok):
     """Korrigiert typische OCR-Verwechslungen (O/0, I/1 …) passend zum Labelformat."""
-    if len(tok) != len(FORMAT):
+    for fmt in FORMATS:
+        if len(tok) == len(fmt):
+            out = [to_kind(c, k) for c, k in zip(tok, fmt)]
+            if all(out):
+                return "".join(out)
+    return None
+
+
+def digits_only(s):
+    out = "".join(c if c.isdigit() else TO_DIGIT.get(c, "?") for c in s)
+    return None if "?" in out else out
+
+
+def fit_prefix(tok, prefix):
+    """Ganze Nummer mit (leicht verlesenem) Präfix: FO8482IDOO540 -> F08482ID00540."""
+    n = len(prefix)
+    if len(tok) <= n or n < 4:
         return None
-    out = []
-    for ch, kind in zip(tok, FORMAT):
-        if kind == "D":
-            ch = ch if ch.isdigit() else TO_DIGIT.get(ch)
-        else:
-            ch = ch if ch.isalpha() else TO_LETTER.get(ch)
-        if not ch:
-            return None
-        out.append(ch)
-    return "".join(out)
-
-
-def pick_label(lines, prefix=""):
-    """Sucht in OCR-Zeilen die wahrscheinlichste Labelnummer."""
-    best = None
-    for line in lines:
-        text = line.upper().replace("|", "I")
-        for chunk in (text, text.replace(" ", "")):
-            for tok in re.findall(r"[A-Z0-9]{8,20}", chunk):
-                fixed = fit_format(tok)
-                if fixed:
-                    score = 3 if fixed == tok else 2
-                    cand = fixed
-                else:
-                    digits = sum(c.isdigit() for c in tok)
-                    letters = len(tok) - digits
-                    if digits < 3 or letters < 1:
-                        continue
-                    score, cand = 1, tok
-                if prefix and not cand.startswith(prefix) and score < 2:
-                    continue  # mit Präfix nur sichere Treffer als ganze Nummer akzeptieren
-                if not best or score > best[0] or (score == best[0] and len(cand) > len(best[1])):
-                    best = (score, cand)
-    return best[1] if best else None
+    head = [to_kind(c, "D" if p.isdigit() else "L") for c, p in zip(tok[:n], prefix)]
+    if sum(h != p for h, p in zip(head, prefix)) > 1:
+        return None
+    rest = digits_only(tok[n:])
+    return prefix + rest if rest and len(rest) <= 6 else None
 
 
 def join_prefix(prefix, tok):
@@ -140,79 +138,76 @@ def join_prefix(prefix, tok):
             if prefix.endswith(tok[:k]):
                 rest = tok[k:]
                 break
-    rest = "".join(c if c.isdigit() else TO_DIGIT.get(c, "?") for c in rest)
-    if not rest or "?" in rest or len(rest) > 6:
+    rest = digits_only(rest)
+    if not rest or len(rest) > 6:
         return None
     return prefix + rest
 
 
-def pick_suffix(words, prefix):
-    """Sucht die (meist mit Marker geschriebenen) Ziffern und hängt sie an das Präfix.
-    words: Liste (Text, Höhe). Bevorzugt die größte Schrift."""
-    best = None
-    heights = sorted(h for _, h in words)
-    # Marker-Schrift ist meist größer als gedruckter Text: kleine Wörter (z. B. "18 µm") ignorieren
-    min_height = heights[len(heights) // 2] * 1.3 if len(heights) >= 4 else 0
-    for text, height in words:
-        if height < min_height:
-            continue
-        tok = re.sub(r"[^A-Z0-9|]", "", text.upper()).replace("|", "1")
-        if not tok or len(tok) > len(prefix) + 6:
-            continue
-        digits = sum(c.isdigit() or c in TO_DIGIT for c in tok)
-        if not tok.startswith(prefix) and digits * 2 < len(tok) and not any(
-                prefix.endswith(tok[:k]) for k in range(2, len(tok) + 1)):
-            continue
-        label = join_prefix(prefix, tok)
-        if not label:
-            continue
-        pure = tok.isdigit() or tok.startswith(prefix) or any(
-            prefix.endswith(tok[:k]) and tok[k:].isdigit() for k in range(1, len(tok)))
-        key = (pure, height)
-        if not best or key > best[0]:
-            best = (key, label, text)
-    return (best[1], best[2], best[0][0]) if best else (None, None, False)
+MIN_MARKER_DIGITS = 3  # so viele Ziffern muss die Marker-Zahl mindestens haben (z. B. 548, 00539)
 
 
-def windows_ocr(img):
-    """Texterkennung mit der in Windows eingebauten OCR.
-    Gibt (Zeilen, Wörter als (Text, Höhe)) zurück."""
-    import asyncio
+def candidates(text, conf, prefix="", marker_ok=True):
+    """Mögliche Labelnummern in einem OCR-Textstück, mit Gewicht. Gibt {Label: (Gewicht, Art)}."""
+    out = {}
 
-    from winrt.windows.graphics.imaging import BitmapPixelFormat, SoftwareBitmap
-    from winrt.windows.media.ocr import OcrEngine
-    from winrt.windows.storage.streams import DataWriter
+    def add(label, weight, kind):
+        if label and weight > out.get(label, (0, ""))[0]:
+            out[label] = (weight, kind)
 
-    engine = OcrEngine.try_create_from_user_profile_languages()
-    if engine is None:
-        from winrt.windows.globalization import Language
+    raw = text.strip()
+    short = re.sub(r"[\s.,'`´·_~-]", "", raw)
+    if short and len(short) <= 8 and sum(c.isdigit() for c in short) >= len(short) / 2:
+        short = "".join(HAND.get(c, c) for c in short)  # handschriftlich "0053g" -> "00539"
+    variants = {raw.upper(), raw.upper().replace(" ", ""), short.upper()}
+    for chunk in variants:
+        for tok in re.findall(r"[A-Z0-9|]+", chunk.replace("|", "1")):
+            fixed = fit_format(tok)
+            if fixed:
+                add(fixed, conf * (2.0 if fixed == tok else 1.6), "text")
+            if prefix:
+                add(fit_prefix(tok, prefix), conf * 1.8, "text")
+                if marker_ok and MIN_MARKER_DIGITS <= len(tok) <= len(prefix) + 6:
+                    lab = join_prefix(prefix, tok)
+                    if lab:
+                        pure = tok.isdigit() or tok.startswith(prefix) or any(
+                            prefix.endswith(tok[:k]) and tok[k:].isdigit() for k in range(1, len(tok)))
+                        add(lab, conf * (1.0 if pure else 0.4), "marker")
+            elif not fixed and 8 <= len(tok) <= 20:
+                d = sum(c.isdigit() for c in tok)
+                if d >= 3 and len(tok) - d >= 1:
+                    add(tok, conf * 0.5, "text")
+    return out
 
-        engine = OcrEngine.try_create_from_language(Language("en-US"))
-    if engine is None:
-        raise RuntimeError("Windows-Texterkennung nicht verfügbar (OCR-Sprachpaket fehlt)")
-    limit = OcrEngine.max_image_dimension
-    img = img.convert("L")
-    if max(img.size) > limit:
-        img.thumbnail((limit, limit), Image.LANCZOS)
-    w, h = img.size
-    writer = DataWriter()
-    writer.write_bytes(img.tobytes())
-    bitmap = SoftwareBitmap.create_copy_from_buffer(writer.detach_buffer(), BitmapPixelFormat.GRAY8, w, h)
 
-    async def run():
-        return await engine.recognize_async(bitmap)
+def ocr_engine():
+    global _ENGINE
+    if _ENGINE is None:
+        from rapidocr_onnxruntime import RapidOCR
 
-    result = asyncio.run(run())
-    lines = [ln.text for ln in result.lines]
-    words = [(w.text, w.bounding_rect.height) for ln in result.lines for w in ln.words]
-    return lines, words
+        _ENGINE = RapidOCR()
+    return _ENGINE
 
 
-def find_stickers(gray, max_count=3):
-    """Findet helle, rechteckige Flächen (Etiketten/Klebeband). Gibt Boxen (x0, y0, x1, y1)
+def run_ocr(img):
+    """Texterkennung (PP-OCR über RapidOCR). Gibt [(Text, Konfidenz)] zurück."""
+    import numpy as np
+
+    arr = np.ascontiguousarray(np.asarray(img.convert("RGB"))[:, :, ::-1])  # BGR
+    res, _ = ocr_engine()(arr)
+    return [(r[1], float(r[2])) for r in (res or [])]
+
+
+def find_stickers(gray, max_count=4, rgb=None):
+    """Findet helle, rechteckige, unbunte Flächen (Etiketten/Klebeband). Gibt Boxen (x0, y0, x1, y1)
     relativ zur Bildgröße (0..1) zurück, größte zuerst."""
     import numpy as np
 
+    sat = None
+    if rgb is not None:  # Sättigung: gelbe Pads, grüne Platine usw. aussortieren
+        hsv = rgb.copy()
+        hsv.thumbnail((320, 320))
+        sat = np.asarray(hsv.convert("HSV"), dtype=np.float32)[:, :, 1]
     small = gray.copy()
     small.thumbnail((320, 320))
     small = small.filter(ImageFilter.GaussianBlur(2))
@@ -246,74 +241,102 @@ def find_stickers(gray, max_count=3):
                 continue  # berührt den Bildrand -> eher Hintergrund
             if area / (bw * bh) < 0.7 or max(bw, bh) / min(bw, bh) > 8:
                 continue  # nicht rechteckig genug
+            if sat is not None and sat.shape == mask.shape and np.median(sat[ys, xs]) > 70:
+                continue  # zu bunt für ein Etikett
             boxes.append((area, (bx0 / w, by0 / h, bx1 / w, by1 / h)))
     boxes.sort(reverse=True)
     return [b for _, b in boxes[:max_count]]
 
 
+def crop_box(img, box, margin=0.03):
+    W, H = img.size
+    x0, y0, x1, y1 = box
+    mx, my = (x1 - x0) * margin, (y1 - y0) * margin
+    return img.crop((int(max(0, x0 - mx) * W), int(max(0, y0 - my) * H),
+                     int(min(1, x1 + mx) * W), int(min(1, y1 + my) * H)))
+
+
+def fit_size(img, target=640):
+    s = target / max(img.size)
+    if s > 1 or max(img.size) > 1600:
+        s = min(s, 1600 / max(img.size)) if s <= 1 else s
+        img = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))), Image.LANCZOS)
+    return img
+
+
 def enhance_crop(base, box):
     """Schneidet ein Etikett aus, entfernt Raster/Rauschen und verstärkt blasse Schrift."""
-    W, H = base.size
-    x0, y0, x1, y1 = box
-    mx, my = (x1 - x0) * 0.03, (y1 - y0) * 0.03
-    crop = base.crop((int(max(0, x0 - mx) * W), int(max(0, y0 - my) * H),
-                      int(min(1, x1 + mx) * W), int(min(1, y1 + my) * H)))
-    radius = max(1.0, max(crop.size) / 350)  # Moiré/Pixelraster weichzeichnen
-    crop = crop.filter(ImageFilter.GaussianBlur(radius))
-    # ungleichmäßige Helligkeit ausgleichen und blasse Striche kräftig abdunkeln
     import numpy as np
 
+    crop = crop_box(base, box)
+    crop = crop.filter(ImageFilter.GaussianBlur(max(1.0, max(crop.size) / 350)))  # Moiré weg
     a = np.asarray(crop, dtype=np.float32)
     bg = np.asarray(crop.filter(ImageFilter.GaussianBlur(max(crop.size) / 15)), dtype=np.float32)
-    norm = a / np.maximum(bg, 1.0)
+    norm = a / np.maximum(bg, 1.0)  # ungleichmäßige Helligkeit ausgleichen
     lo, hi = np.percentile(norm, 0.5), np.percentile(norm, 50)
-    norm = np.clip((norm - lo) / max(hi - lo, 1e-3), 0, 1) ** 1.6
-    crop = Image.fromarray((norm * 255).astype(np.uint8))
-    scale = min(1600 / max(crop.size), max(1.0, 500 / min(crop.size)))
-    if scale != 1:
-        crop = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))), Image.LANCZOS)
-    return crop
+    norm = np.clip((norm - lo) / max(hi - lo, 1e-3), 0, 1) ** 1.6  # blasse Striche abdunkeln
+    return fit_size(Image.fromarray((norm * 255).astype(np.uint8)))
+
+
+def sticker_variants(rgb, gray):
+    """Ausschnitte aller gefundenen Etiketten: Blaukanal (farbiger Marker) und entrastert/verstärkt."""
+    for i, box in enumerate(find_stickers(gray, rgb=rgb)):
+        blue = ImageOps.autocontrast(crop_box(rgb, box).split()[2], cutoff=1)
+        yield f"etikett{i + 1}/blau", fit_size(blue)
+        yield f"etikett{i + 1}/verstärkt", enhance_crop(gray, box)
 
 
 def find_text(path, prefix="", ocr=None, debug=False):
-    ocr = ocr or (windows_ocr if sys.platform == "win32" else None)
-    if ocr is None:
-        return None, "kein QR-Code (Texterkennung nur unter Windows)"
+    ocr = ocr or run_ocr
     try:
-        base = load_gray(path, 2600)
+        rgb = Image.open(path)
+        if rgb.format == "JPEG":
+            rgb.draft("RGB", (OCR_MAX_SIDE, OCR_MAX_SIDE))
+        rgb = rgb.convert("RGB")
+        rgb.thumbnail((OCR_MAX_SIDE, OCR_MAX_SIDE), Image.LANCZOS)
+        gray = rgb.convert("L")
     except Exception as e:  # noqa: BLE001
         return None, f"Bild nicht lesbar: {e}"
-    seen = []
-    suffix = None  # (Label, Fundstelle); reine Ziffern schlagen korrigierte Buchstaben (z. B. "Oss")
+
+    votes, kinds, seen = {}, {}, []
+
+    def read(name, img):
+        items = ocr(img)
+        if debug and items:
+            seen.append(f"{name}: " + " | ".join(t for t, _ in items))
+        # Marker-Zahlen nur, wenn das Textstück allein steht (nicht "S3(2.4mm)" o. ä.)
+        for text, conf in items:
+            alone = bool(re.fullmatch(r"[\sA-Za-z0-9.,'`´·_~|-]{2,16}", text.strip())) and not re.search(
+                r"[()（）]|MM|mm", text)
+            for label, (weight, kind) in candidates(text, conf, prefix, marker_ok=alone).items():
+                votes[label] = votes.get(label, 0) + weight
+                kinds[label] = kind
+
+    def best():
+        if not votes:
+            return None, 0
+        # Nummern im bekannten Format (12/13 Zeichen) bevorzugen: "005411" -> zu lang -> verworfen
+        scored = {k: v * (1.5 if fit_format(k) == k else 0.5) for k, v in votes.items()}
+        label = max(scored, key=scored.get)
+        return label, scored[label]
+
     try:
-        variants = [("ganz", base)]
-        for i, box in enumerate(find_stickers(base)):
-            variants.append((f"etikett{i + 1}", enhance_crop(base, box)))
-        for name, var in variants:
-            for angle in (0, 90, 270, 180):
-                img = var if angle == 0 else var.rotate(angle, expand=True)
-                lines, words = ocr(img)
-                if debug and lines:
-                    seen.append(f"{name}/{angle}°: " + " | ".join(lines))
-                label = pick_label(lines, prefix)
-                if label:
-                    return label, OCR_HINT
-                if prefix:
-                    cand, raw, pure = pick_suffix(words, prefix)
-                    if cand and (not suffix or (pure and not suffix[2])):
-                        suffix = (cand, f"{name}/{angle}°: Marker gelesen als '{raw}'", pure)
-                    if suffix and suffix[2]:
-                        break
-            if suffix and suffix[2]:
-                break
+        read("ganz", rgb)
+        label, score = best()
+        if not (label and kinds[label] == "text" and score >= 2.4):
+            for name, img in sticker_variants(rgb, gray):  # Etiketten einzeln, aufbereitet
+                read(name, img)
+            if not votes:
+                read("ganz/90°", rgb.rotate(90, expand=True))
+        label, score = best()
     except Exception as e:  # noqa: BLE001
         return None, f"Texterkennung fehlgeschlagen: {e}"
-    if suffix:
-        return suffix[0], PREFIX_HINT + (f" [{suffix[1]}]" if debug else "")
+    note = (" [" + " || ".join(seen) + f" → Stimmen: {dict(sorted(votes.items(), key=lambda kv: -kv[1])[:4])}]"
+            if debug else "")
+    if label and score >= 0.4:
+        return label, (PREFIX_HINT if kinds[label] == "marker" else OCR_HINT) + note
     msg = "weder QR-Code, Labeltext noch Marker-Ziffern gefunden" if prefix else "weder QR-Code noch Labeltext gefunden"
-    if debug:
-        msg += " [OCR: " + (" || ".join(seen) or "nichts gelesen") + "]"
-    return None, msg
+    return None, msg + note
 
 
 def find_label(path, prefix="", debug=False):
@@ -335,8 +358,8 @@ def list_images(folder):
 
 
 def default_jobs(n_files):
-    # große Bilder brauchen RAM -> höchstens 6 Prozesse
-    return max(1, min(6, (os.cpu_count() or 2) - 1, n_files))
+    # große Bilder + Texterkennung brauchen RAM -> höchstens 4 Prozesse
+    return max(1, min(4, (os.cpu_count() or 2) - 1, n_files))
 
 
 def unique_target(folder, label, ext, src, taken):
