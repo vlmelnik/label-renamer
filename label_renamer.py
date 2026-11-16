@@ -144,10 +144,13 @@ def join_prefix(prefix, tok):
     return prefix + rest
 
 
-MIN_MARKER_DIGITS = 3  # so viele Ziffern muss die Marker-Zahl mindestens haben (z. B. 548, 00539)
+# so viele Zeichen muss die Marker-Zahl mindestens haben: auf einem Etikett 2 (z. B. 55),
+# irgendwo sonst im Bild 3 (sonst wird Platinenbeschriftung wie "S2" zur Nummer)
+MIN_MARKER_DIGITS_STICKER = 2
+MIN_MARKER_DIGITS_ANYWHERE = 3
 
 
-def candidates(text, conf, prefix="", marker_ok=True):
+def candidates(text, conf, prefix="", marker_ok=True, min_digits=MIN_MARKER_DIGITS_ANYWHERE):
     """Mögliche Labelnummern in einem OCR-Textstück, mit Gewicht. Gibt {Label: (Gewicht, Art)}."""
     out = {}
 
@@ -167,7 +170,7 @@ def candidates(text, conf, prefix="", marker_ok=True):
                 add(fixed, conf * (2.0 if fixed == tok else 1.6), "text")
             if prefix:
                 add(fit_prefix(tok, prefix), conf * 1.8, "text")
-                if marker_ok and MIN_MARKER_DIGITS <= len(tok) <= len(prefix) + 6:
+                if marker_ok and min_digits <= len(tok) <= len(prefix) + 6:
                     lab = join_prefix(prefix, tok)
                     if lab:
                         pure = tok.isdigit() or tok.startswith(prefix) or any(
@@ -308,7 +311,8 @@ def find_text(path, prefix="", ocr=None, debug=False):
         for text, conf in items:
             alone = bool(re.fullmatch(r"[\sA-Za-z0-9.,'`´·_~|-]{2,16}", text.strip())) and not re.search(
                 r"[()（）]|MM|mm", text)
-            for label, (weight, kind) in candidates(text, conf, prefix, marker_ok=alone).items():
+            min_digits = MIN_MARKER_DIGITS_STICKER if name.startswith("etikett") else MIN_MARKER_DIGITS_ANYWHERE
+            for label, (weight, kind) in candidates(text, conf, prefix, alone, min_digits).items():
                 votes[label] = votes.get(label, 0) + weight
                 kinds[label] = kind
 
@@ -714,7 +718,7 @@ class App:
         elif not p:
             text = "Nur Buchstaben und Ziffern erlaubt."
         else:
-            text = f"Marker „550“ → {p}550 · Marker „00550“ → {join_prefix(p, '00550') or p + '00550'}"
+            text = f"Marker „55“ → {p}55 · „550“ → {p}550 · „00550“ → {join_prefix(p, '00550') or p + '00550'}"
         self.prefix_info.configure(text=text)
 
     def reset_progress(self):

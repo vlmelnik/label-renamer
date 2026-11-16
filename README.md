@@ -22,7 +22,7 @@ Das Fenster zeigt den Fortschritt mit Geschwindigkeitskurve, Restzeit und Anzahl
 
 ## Abgeklebtes Label
 
-Ist das Label abgeklebt und die Nummer nur teilweise mit Marker daraufgeschrieben, unter **Präfix** den festen Anfang eintragen, z. B. `F08482ID00`. Findet das Programm weder QR-Code noch die gedruckte Nummer, liest es die (größte) Ziffernfolge auf dem Bild und hängt sie an: Marker `550` → `F08482ID00550`. Steht auf dem Marker schon ein Teil des Präfixes (z. B. `00550`), wird das erkannt. Solche Treffer sind orange markiert und sollten geprüft werden. Das Präfix wird gespeichert.
+Ist das Label abgeklebt und die Nummer nur teilweise mit Marker daraufgeschrieben, unter **Präfix** den festen Anfang eintragen, z. B. `F08482ID00`. Findet das Programm weder QR-Code noch die gedruckte Nummer, liest es die (größte) Ziffernfolge auf dem Bild und hängt sie an: Marker `550` → `F08482ID00550`. Steht auf dem Marker schon ein Teil des Präfixes (z. B. `00550`), wird das erkannt. Marker-Zahlen dürfen 2 oder mehr Ziffern haben; 2-stellige werden nur auf einem Etikett akzeptiert, nicht irgendwo auf der Platine. Solche Treffer sind orange markiert und sollten geprüft werden. Das Präfix wird gespeichert.
 
 ## Verhalten
 
