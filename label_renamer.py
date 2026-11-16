@@ -48,10 +48,10 @@ def clean(text):
 
 
 def load_gray(path, max_side):
-    im = Image.open(path)
-    if max_side and im.format == "JPEG":
-        im.draft("L", (max_side, max_side))  # JPEG verkleinert dekodieren: schnell, wenig RAM
-    im = im.convert("L")
+    with Image.open(path) as src:  # Datei sofort wieder schließen (keine Sperre)
+        if max_side and src.format == "JPEG":
+            src.draft("L", (max_side, max_side))  # JPEG verkleinert dekodieren: schnell, wenig RAM
+        im = src.convert("L")
     if max_side and max(im.size) > max_side:
         im.thumbnail((max_side, max_side), Image.LANCZOS)
     return im
@@ -292,10 +292,10 @@ def sticker_variants(rgb, gray):
 def find_text(path, prefix="", ocr=None, debug=False):
     ocr = ocr or run_ocr
     try:
-        rgb = Image.open(path)
-        if rgb.format == "JPEG":
-            rgb.draft("RGB", (OCR_MAX_SIDE, OCR_MAX_SIDE))
-        rgb = rgb.convert("RGB")
+        with Image.open(path) as src:  # Datei sofort wieder schließen (keine Sperre)
+            if src.format == "JPEG":
+                src.draft("RGB", (OCR_MAX_SIDE, OCR_MAX_SIDE))
+            rgb = src.convert("RGB")
         rgb.thumbnail((OCR_MAX_SIDE, OCR_MAX_SIDE), Image.LANCZOS)
         gray = rgb.convert("L")
     except Exception as e:  # noqa: BLE001
