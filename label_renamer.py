@@ -165,8 +165,8 @@ def pick_suffix(words, prefix):
             continue
         label = join_prefix(prefix, tok)
         if label and (not best or height > best[0]):
-            best = (height, label)
-    return best[1] if best else None
+            best = (height, label, text)
+    return (best[1], best[2]) if best else (None, None)
 
 
 def windows_ocr(img):
@@ -294,13 +294,15 @@ def find_text(path, prefix="", ocr=None, debug=False):
                 if label:
                     return label, OCR_HINT
                 if prefix and not suffix:
-                    suffix = pick_suffix(words, prefix)
+                    suffix, raw = pick_suffix(words, prefix)
+                    if suffix and debug:
+                        seen.append(f"{name}/{angle}°: Marker gelesen als '{raw}'; Zeilen: " + " | ".join(lines))
             if suffix:
                 break
     except Exception as e:  # noqa: BLE001
         return None, f"Texterkennung fehlgeschlagen: {e}"
     if suffix:
-        return suffix, PREFIX_HINT
+        return suffix, PREFIX_HINT + (" [" + " || ".join(seen[-1:]) + "]" if debug else "")
     msg = "weder QR-Code, Labeltext noch Marker-Ziffern gefunden" if prefix else "weder QR-Code noch Labeltext gefunden"
     if debug:
         msg += " [OCR: " + (" || ".join(seen) or "nichts gelesen") + "]"
