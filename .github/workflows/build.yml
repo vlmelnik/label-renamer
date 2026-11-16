@@ -37,6 +37,11 @@ jobs:
           Get-ChildItem test
           if (-not (Test-Path test/F08874ID0109.jpg)) { Write-Error "QR-Erkennung fehlgeschlagen"; exit 1 }
           if (-not (Test-Path test/F08874ID0109_2.jpg)) { Write-Error "Text-Erkennung (OCR) fehlgeschlagen"; exit 1 }
+          New-Item -ItemType Directory test2 | Out-Null
+          Copy-Item tests/sample_marker.jpg test2/IMG_0003.jpg
+          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test2","--headless","--prefix","F08482ID00","--report","report2.txt" -Wait
+          Get-Content report2.txt
+          if (-not (Test-Path test2/F08482ID00550.jpg)) { Write-Error "Präfix + Marker-Ziffern fehlgeschlagen"; exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: LabelRenamer

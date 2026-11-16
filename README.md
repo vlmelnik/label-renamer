@@ -20,6 +20,10 @@ Unter **[Releases](../../releases/latest)** `LabelRenamer.exe` herunterladen.
 
 Das Fenster zeigt den Fortschritt mit Geschwindigkeitskurve, Restzeit und Anzahl erkannter Labels, danach eine Tabelle mit altem und neuem Namen. Mit **Nur Vorschau** wird nichts umbenannt.
 
+## Abgeklebtes Label
+
+Ist das Label abgeklebt und die Nummer nur teilweise mit Marker daraufgeschrieben, unter **Präfix** den festen Anfang eintragen, z. B. `F08482ID00`. Findet das Programm weder QR-Code noch die gedruckte Nummer, liest es die (größte) Ziffernfolge auf dem Bild und hängt sie an: Marker `550` → `F08482ID00550`. Steht auf dem Marker schon ein Teil des Präfixes (z. B. `00550`), wird das erkannt. Solche Treffer sind orange markiert und sollten geprüft werden. Das Präfix wird gespeichert.
+
 ## Verhalten
 
 - Dasselbe Label mehrfach → `F08874ID0109.jpg`, `F08874ID0109_2.jpg`, …

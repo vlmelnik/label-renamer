@@ -35,6 +35,8 @@ LABEL_RE = re.compile(r"^(?=.*[A-Z])[A-Z0-9]{6,40}$")
 FORMAT = "LDDDDDLLDDDD"
 SCALES = (2400, 4000, None)  # längste Kante in px; None = volle Auflösung
 OCR_HINT = "per Text erkannt (kein QR-Code) – bitte prüfen"
+PREFIX_HINT = "Präfix + handschriftliche Ziffern – bitte prüfen"
+PREFIX_RE = re.compile(r"^[A-Z0-9]{1,30}$")
 Image.MAX_IMAGE_PIXELS = None
 
 
@@ -104,7 +106,7 @@ def fit_format(tok):
     return "".join(out)
 
 
-def pick_label(lines):
+def pick_label(lines, prefix=""):
     """Sucht in OCR-Zeilen die wahrscheinlichste Labelnummer."""
     best = None
     for line in lines:
@@ -121,13 +123,55 @@ def pick_label(lines):
                     if digits < 3 or letters < 1:
                         continue
                     score, cand = 1, tok
+                if prefix and not cand.startswith(prefix) and score < 2:
+                    continue  # mit Präfix nur sichere Treffer als ganze Nummer akzeptieren
                 if not best or score > best[0] or (score == best[0] and len(cand) > len(best[1])):
                     best = (score, cand)
     return best[1] if best else None
 
 
-def windows_ocr_lines(img):
-    """Texterkennung mit der in Windows eingebauten OCR. Gibt Textzeilen zurück."""
+def join_prefix(prefix, tok):
+    """Präfix + erkannte Ziffern. Überlappung wird erkannt: F08482ID00 + 00550 -> F08482ID00550."""
+    if tok.startswith(prefix):
+        rest = tok[len(prefix):]
+    else:
+        rest = tok
+        for k in range(min(len(prefix), len(tok)), 0, -1):
+            if prefix.endswith(tok[:k]):
+                rest = tok[k:]
+                break
+    rest = "".join(c if c.isdigit() else TO_DIGIT.get(c, "?") for c in rest)
+    if not rest or "?" in rest or len(rest) > 6:
+        return None
+    return prefix + rest
+
+
+def pick_suffix(words, prefix):
+    """Sucht die (meist mit Marker geschriebenen) Ziffern und hängt sie an das Präfix.
+    words: Liste (Text, Höhe). Bevorzugt die größte Schrift."""
+    best = None
+    heights = sorted(h for _, h in words)
+    # Marker-Schrift ist meist größer als gedruckter Text: kleine Wörter (z. B. "18 µm") ignorieren
+    min_height = heights[len(heights) // 2] * 1.3 if len(heights) >= 4 else 0
+    for text, height in words:
+        if height < min_height:
+            continue
+        tok = re.sub(r"[^A-Z0-9|]", "", text.upper()).replace("|", "1")
+        if not tok or len(tok) > len(prefix) + 6:
+            continue
+        digits = sum(c.isdigit() for c in tok)
+        if not tok.startswith(prefix) and digits * 2 < len(tok) and not any(
+                prefix.endswith(tok[:k]) for k in range(2, len(tok) + 1)):
+            continue
+        label = join_prefix(prefix, tok)
+        if label and (not best or height > best[0]):
+            best = (height, label)
+    return best[1] if best else None
+
+
+def windows_ocr(img):
+    """Texterkennung mit der in Windows eingebauten OCR.
+    Gibt (Zeilen, Wörter als (Text, Höhe)) zurück."""
     import asyncio
 
     from winrt.windows.graphics.imaging import BitmapPixelFormat, SoftwareBitmap
@@ -154,33 +198,44 @@ def windows_ocr_lines(img):
         return await engine.recognize_async(bitmap)
 
     result = asyncio.run(run())
-    return [ln.text for ln in result.lines]
+    lines = [ln.text for ln in result.lines]
+    words = [(w.text, w.bounding_rect.height) for ln in result.lines for w in ln.words]
+    return lines, words
 
 
-def find_text(path):
-    if sys.platform != "win32":
+def find_text(path, prefix="", ocr=None):
+    ocr = ocr or (windows_ocr if sys.platform == "win32" else None)
+    if ocr is None:
         return None, "kein QR-Code (Texterkennung nur unter Windows)"
     try:
         base = load_gray(path, 2600)
     except Exception as e:  # noqa: BLE001
         return None, f"Bild nicht lesbar: {e}"
+    suffix = None
     try:
         for angle in (0, 90, 270, 180):
             img = base if angle == 0 else base.rotate(angle, expand=True)
-            label = pick_label(windows_ocr_lines(img))
+            lines, words = ocr(img)
+            label = pick_label(lines, prefix)
             if label:
                 return label, OCR_HINT
+            if prefix and not suffix:
+                suffix = pick_suffix(words, prefix)
     except Exception as e:  # noqa: BLE001
         return None, f"Texterkennung fehlgeschlagen: {e}"
+    if suffix:
+        return suffix, PREFIX_HINT
+    if prefix:
+        return None, "weder QR-Code, Labeltext noch Marker-Ziffern gefunden"
     return None, "weder QR-Code noch Labeltext gefunden"
 
 
-def find_label(path):
+def find_label(path, prefix=""):
     """Gibt (Labelnummer oder None, Info) zurück. Läuft in einem eigenen Prozess."""
     label, info, try_text = find_qr(path)
     if label or not try_text:
         return label, info
-    return find_text(path)
+    return find_text(path, prefix)
 
 
 # --------------------------------------------------------------------------- Umbenennen
@@ -226,7 +281,7 @@ def rename_with_retry(src, dst):
 RENAMED, PLANNED, UNCHANGED, NOT_FOUND, DENIED = "renamed", "planned", "unchanged", "notfound", "denied"
 
 
-def run_job(folder, dry_run, emit, cancel_event, jobs=0):
+def run_job(folder, dry_run, emit, cancel_event, jobs=0, prefix=""):
     """Analysiert und benennt um. emit(event, **daten) meldet den Fortschritt."""
     files = list_images(folder)
     emit("start", total=len(files))
@@ -237,7 +292,7 @@ def run_job(folder, dry_run, emit, cancel_event, jobs=0):
     results = {}
     ex = ProcessPoolExecutor(max_workers=jobs)
     try:
-        futs = {ex.submit(find_label, f): f for f in files}
+        futs = {ex.submit(find_label, f, prefix): f for f in files}
         for fut in as_completed(futs):
             if cancel_event.is_set():
                 break
@@ -283,6 +338,34 @@ def run_job(folder, dry_run, emit, cancel_event, jobs=0):
     emit("done", cancelled=False)
 
 
+# --------------------------------------------------------------------------- Einstellungen
+
+def settings_path():
+    base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")
+    return os.path.join(base, APP, "settings.json")
+
+
+def load_settings():
+    import json
+
+    try:
+        with open(settings_path(), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data):
+    import json
+
+    try:
+        os.makedirs(os.path.dirname(settings_path()), exist_ok=True)
+        with open(settings_path(), "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass
+
+
 # --------------------------------------------------------------------------- Oberfläche
 
 def fmt_time(s):
@@ -326,8 +409,8 @@ class App:
         self.dry = False
 
         root.title(APP)
-        root.minsize(780, 640)
-        root.geometry("940x740")
+        root.minsize(800, 720)
+        root.geometry("960x820")
         try:
             import sv_ttk
 
@@ -368,6 +451,20 @@ class App:
         self.folder_info = ttk.Label(box, style="Muted.TLabel")
         self.folder_info.pack(anchor="w", pady=(6, 0))
         self.folder_var.trace_add("write", lambda *_: self.update_folder_info())
+
+        # Einstellung: abgeklebtes Label
+        opt = ttk.LabelFrame(main, text=" Einstellung: abgeklebtes Label (optional) ", padding=10)
+        opt.pack(fill="x", pady=(12, 0))
+        row = ttk.Frame(opt)
+        row.pack(fill="x")
+        ttk.Label(row, text="Präfix:").pack(side="left")
+        self.prefix_var = tk.StringVar(value=load_settings().get("prefix", ""))
+        self.prefix_entry = ttk.Entry(row, textvariable=self.prefix_var, width=22, font=(font, 10))
+        self.prefix_entry.pack(side="left", padx=(8, 12), ipady=2)
+        self.prefix_info = ttk.Label(row, style="Muted.TLabel")
+        self.prefix_info.pack(side="left", fill="x", expand=True)
+        self.prefix_var.trace_add("write", lambda *_: self.on_prefix_change())
+        self.on_prefix_change()
 
         row = ttk.Frame(main)
         row.pack(fill="x", pady=12)
@@ -477,7 +574,13 @@ class App:
         self.cancel.clear()
         self.running = True
         self.dry = self.dry_var.get()
-        for w in (self.entry, self.browse_btn, self.dry_chk, self.open_btn):
+        prefix = self.prefix()
+        if self.prefix_var.get().strip() and not prefix:
+            self.running = False
+            messagebox.showwarning(APP, "Das Präfix darf nur Buchstaben und Ziffern enthalten.")
+            return
+        save_settings({"prefix": prefix})
+        for w in (self.entry, self.browse_btn, self.dry_chk, self.open_btn, self.prefix_entry):
             w.configure(state="disabled")
         self.start_btn.configure(text="Abbrechen", style="Stop.TButton")
         self.prog_title.configure(text="Bilder werden gesucht …")
@@ -485,7 +588,25 @@ class App:
         def emit(event, **d):
             self.queue.put((event, d))
 
-        threading.Thread(target=run_job, args=(folder, self.dry, emit, self.cancel), daemon=True).start()
+        threading.Thread(target=run_job, args=(folder, self.dry, emit, self.cancel, 0, prefix), daemon=True).start()
+
+    def prefix(self):
+        p = re.sub(r"\s+", "", self.prefix_var.get()).upper()
+        return p if PREFIX_RE.match(p) else ""
+
+    def on_prefix_change(self):
+        raw = self.prefix_var.get()
+        up = raw.upper().replace(" ", "")
+        if raw != up:  # nur Großbuchstaben (Tk ruft den Trace dabei nicht erneut auf)
+            self.prefix_var.set(up)
+        p = self.prefix()
+        if not up:
+            text = "leer = aus. Bei abgeklebtem Label mit Marker-Nummer z. B. F08482ID00 eintragen."
+        elif not p:
+            text = "Nur Buchstaben und Ziffern erlaubt."
+        else:
+            text = f"Marker „550“ → {p}550 · Marker „00550“ → {join_prefix(p, '00550') or p + '00550'}"
+        self.prefix_info.configure(text=text)
 
     def reset_progress(self):
         self.total = self.done = self.found = self.missing = 0
@@ -572,14 +693,14 @@ class App:
     def on_result(self, old, new, status, info):
         self.counts[status] += 1
         tags = (status,)
-        if info == OCR_HINT and status in (RENAMED, PLANNED):
+        if info in (OCR_HINT, PREFIX_HINT) and status in (RENAMED, PLANNED):
             tags = ("ocr",)
         self.tree.insert("", "end", values=(self.STATUS_TEXT[status], old, new or "–", info), tags=tags)
 
     def on_done(self, cancelled):
         self.running = False
         elapsed = time.time() - self.t_start if self.t_start else 0
-        for w in (self.entry, self.browse_btn, self.dry_chk, self.open_btn):
+        for w in (self.entry, self.browse_btn, self.dry_chk, self.open_btn, self.prefix_entry):
             w.configure(state="normal")
         self.start_btn.configure(state="normal", text="Start", style="Accent.TButton")
         self.stat_vars["eta"].set("–")
@@ -650,7 +771,7 @@ def run_gui(folder=None):
     root.mainloop()
 
 
-def run_headless(folder, dry_run, report=None):
+def run_headless(folder, dry_run, report=None, prefix=""):
     """Ohne Fenster, für automatische Tests."""
     lines, counts = [], {}
 
@@ -659,7 +780,7 @@ def run_headless(folder, dry_run, report=None):
             counts[d["status"]] = counts.get(d["status"], 0) + 1
             lines.append(f"{d['status']}\t{d['old']}\t{d['new']}\t{d['info']}")
 
-    run_job(folder, dry_run, emit, threading.Event())
+    run_job(folder, dry_run, emit, threading.Event(), 0, prefix)
     text = "\n".join(lines) + "\n"
     if report:
         with open(report, "w", encoding="utf-8") as fh:
@@ -675,11 +796,12 @@ def main():
     ap.add_argument("-n", "--dry-run", action="store_true", help="nur Vorschau, nichts umbenennen")
     ap.add_argument("--headless", action="store_true", help="ohne Fenster ausführen")
     ap.add_argument("--report", help="Ergebnisliste in diese Datei schreiben (nur mit --headless)")
+    ap.add_argument("--prefix", default="", help="Präfix für abgeklebte Labels, z. B. F08482ID00")
     args = ap.parse_args()
     if args.headless:
         if not args.folder or not os.path.isdir(args.folder):
             return 1
-        return run_headless(args.folder, args.dry_run, args.report)
+        return run_headless(args.folder, args.dry_run, args.report, args.prefix.upper())
     run_gui(args.folder if args.folder and os.path.isdir(args.folder) else None)
     return 0
 
