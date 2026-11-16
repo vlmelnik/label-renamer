@@ -24,7 +24,7 @@ jobs:
       - name: Build
         run: >
           pyinstaller --onefile --windowed --name LabelRenamer
-          --collect-all zxingcpp --collect-all pillow_heif --collect-all winrt --collect-all sv_ttk
+          --collect-all zxingcpp --collect-all pillow_heif --collect-all winrt --collect-all sv_ttk --collect-submodules numpy
           label_renamer.py
       - name: Smoke test
         shell: pwsh
@@ -32,16 +32,23 @@ jobs:
           New-Item -ItemType Directory test | Out-Null
           Copy-Item tests/sample.jpg test/IMG_0001.jpg
           Copy-Item tests/sample_noqr.jpg test/IMG_0002.jpg
-          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test","--headless","--report","report.txt" -Wait
+          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test","--headless","--report","report.txt","--debug" -Wait
           Get-Content report.txt
           Get-ChildItem test
           if (-not (Test-Path test/F08874ID0109.jpg)) { Write-Error "QR-Erkennung fehlgeschlagen"; exit 1 }
           if (-not (Test-Path test/F08874ID0109_2.jpg)) { Write-Error "Text-Erkennung (OCR) fehlgeschlagen"; exit 1 }
           New-Item -ItemType Directory test2 | Out-Null
           Copy-Item tests/sample_marker.jpg test2/IMG_0003.jpg
-          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test2","--headless","--prefix","F08482ID00","--report","report2.txt" -Wait
+          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test2","--headless","--prefix","F08482ID00","--report","report2.txt","--debug" -Wait
           Get-Content report2.txt
-          if (-not (Test-Path test2/F08482ID00550.jpg)) { Write-Error "Präfix + Marker-Ziffern fehlgeschlagen"; exit 1 }
+          New-Item -ItemType Directory test3 | Out-Null
+          Copy-Item tests/sample_marker_faint.jpg test3/IMG_0004.jpg
+          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test3","--headless","--prefix","F08482ID00","--report","report3.txt","--debug" -Wait
+          Get-Content report3.txt
+          $fail = $false
+          if (-not (Test-Path test2/F08482ID00550.jpg)) { Write-Host "::error::Präfix + große Marker-Ziffern fehlgeschlagen"; $fail = $true }
+          if (-not (Test-Path test3/F08482ID00532.jpg)) { Write-Host "::error::Präfix + blasse gedrehte Marker-Ziffern fehlgeschlagen"; $fail = $true }
+          if ($fail) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: LabelRenamer

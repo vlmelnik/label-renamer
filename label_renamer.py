@@ -16,7 +16,7 @@ import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 
 try:
     import pillow_heif
@@ -159,7 +159,7 @@ def pick_suffix(words, prefix):
         tok = re.sub(r"[^A-Z0-9|]", "", text.upper()).replace("|", "1")
         if not tok or len(tok) > len(prefix) + 6:
             continue
-        digits = sum(c.isdigit() for c in tok)
+        digits = sum(c.isdigit() or c in TO_DIGIT for c in tok)
         if not tok.startswith(prefix) and digits * 2 < len(tok) and not any(
                 prefix.endswith(tok[:k]) for k in range(2, len(tok) + 1)):
             continue
@@ -203,7 +203,74 @@ def windows_ocr(img):
     return lines, words
 
 
-def find_text(path, prefix="", ocr=None):
+def find_stickers(gray, max_count=3):
+    """Findet helle, rechteckige Flächen (Etiketten/Klebeband). Gibt Boxen (x0, y0, x1, y1)
+    relativ zur Bildgröße (0..1) zurück, größte zuerst."""
+    import numpy as np
+
+    small = gray.copy()
+    small.thumbnail((320, 320))
+    small = small.filter(ImageFilter.GaussianBlur(2))
+    a = np.asarray(small, dtype=np.float32)
+    h, w = a.shape
+    thr = max(np.percentile(a, 75), a.mean() + 0.6 * a.std())
+    mask = a >= thr
+    seen = np.zeros_like(mask)
+    boxes = []
+    for y0 in range(h):
+        for x0 in range(w):
+            if not mask[y0, x0] or seen[y0, x0]:
+                continue
+            stack = [(y0, x0)]
+            seen[y0, x0] = True
+            ys, xs = [], []
+            while stack:
+                y, x = stack.pop()
+                ys.append(y)
+                xs.append(x)
+                for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                    if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            area = len(ys)
+            bx0, bx1, by0, by1 = min(xs), max(xs) + 1, min(ys), max(ys) + 1
+            bw, bh = bx1 - bx0, by1 - by0
+            if area < 0.004 * w * h or area > 0.45 * w * h:
+                continue
+            if bx0 == 0 or by0 == 0 or bx1 == w or by1 == h:
+                continue  # berührt den Bildrand -> eher Hintergrund
+            if area / (bw * bh) < 0.7 or max(bw, bh) / min(bw, bh) > 8:
+                continue  # nicht rechteckig genug
+            boxes.append((area, (bx0 / w, by0 / h, bx1 / w, by1 / h)))
+    boxes.sort(reverse=True)
+    return [b for _, b in boxes[:max_count]]
+
+
+def enhance_crop(base, box):
+    """Schneidet ein Etikett aus, entfernt Raster/Rauschen und verstärkt blasse Schrift."""
+    W, H = base.size
+    x0, y0, x1, y1 = box
+    mx, my = (x1 - x0) * 0.03, (y1 - y0) * 0.03
+    crop = base.crop((int(max(0, x0 - mx) * W), int(max(0, y0 - my) * H),
+                      int(min(1, x1 + mx) * W), int(min(1, y1 + my) * H)))
+    radius = max(1.0, max(crop.size) / 350)  # Moiré/Pixelraster weichzeichnen
+    crop = crop.filter(ImageFilter.GaussianBlur(radius))
+    # ungleichmäßige Helligkeit ausgleichen und blasse Striche kräftig abdunkeln
+    import numpy as np
+
+    a = np.asarray(crop, dtype=np.float32)
+    bg = np.asarray(crop.filter(ImageFilter.GaussianBlur(max(crop.size) / 15)), dtype=np.float32)
+    norm = a / np.maximum(bg, 1.0)
+    lo, hi = np.percentile(norm, 0.5), np.percentile(norm, 50)
+    norm = np.clip((norm - lo) / max(hi - lo, 1e-3), 0, 1) ** 1.6
+    crop = Image.fromarray((norm * 255).astype(np.uint8))
+    scale = min(1600 / max(crop.size), max(1.0, 500 / min(crop.size)))
+    if scale != 1:
+        crop = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))), Image.LANCZOS)
+    return crop
+
+
+def find_text(path, prefix="", ocr=None, debug=False):
     ocr = ocr or (windows_ocr if sys.platform == "win32" else None)
     if ocr is None:
         return None, "kein QR-Code (Texterkennung nur unter Windows)"
@@ -211,31 +278,41 @@ def find_text(path, prefix="", ocr=None):
         base = load_gray(path, 2600)
     except Exception as e:  # noqa: BLE001
         return None, f"Bild nicht lesbar: {e}"
+    seen = []
     suffix = None
     try:
-        for angle in (0, 90, 270, 180):
-            img = base if angle == 0 else base.rotate(angle, expand=True)
-            lines, words = ocr(img)
-            label = pick_label(lines, prefix)
-            if label:
-                return label, OCR_HINT
-            if prefix and not suffix:
-                suffix = pick_suffix(words, prefix)
+        variants = [("ganz", base)]
+        for i, box in enumerate(find_stickers(base)):
+            variants.append((f"etikett{i + 1}", enhance_crop(base, box)))
+        for name, var in variants:
+            for angle in (0, 90, 270, 180):
+                img = var if angle == 0 else var.rotate(angle, expand=True)
+                lines, words = ocr(img)
+                if debug and lines:
+                    seen.append(f"{name}/{angle}°: " + " | ".join(lines))
+                label = pick_label(lines, prefix)
+                if label:
+                    return label, OCR_HINT
+                if prefix and not suffix:
+                    suffix = pick_suffix(words, prefix)
+            if suffix:
+                break
     except Exception as e:  # noqa: BLE001
         return None, f"Texterkennung fehlgeschlagen: {e}"
     if suffix:
         return suffix, PREFIX_HINT
-    if prefix:
-        return None, "weder QR-Code, Labeltext noch Marker-Ziffern gefunden"
-    return None, "weder QR-Code noch Labeltext gefunden"
+    msg = "weder QR-Code, Labeltext noch Marker-Ziffern gefunden" if prefix else "weder QR-Code noch Labeltext gefunden"
+    if debug:
+        msg += " [OCR: " + (" || ".join(seen) or "nichts gelesen") + "]"
+    return None, msg
 
 
-def find_label(path, prefix=""):
+def find_label(path, prefix="", debug=False):
     """Gibt (Labelnummer oder None, Info) zurück. Läuft in einem eigenen Prozess."""
     label, info, try_text = find_qr(path)
     if label or not try_text:
         return label, info
-    return find_text(path, prefix)
+    return find_text(path, prefix, debug=debug)
 
 
 # --------------------------------------------------------------------------- Umbenennen
@@ -281,7 +358,7 @@ def rename_with_retry(src, dst):
 RENAMED, PLANNED, UNCHANGED, NOT_FOUND, DENIED = "renamed", "planned", "unchanged", "notfound", "denied"
 
 
-def run_job(folder, dry_run, emit, cancel_event, jobs=0, prefix=""):
+def run_job(folder, dry_run, emit, cancel_event, jobs=0, prefix="", debug=False):
     """Analysiert und benennt um. emit(event, **daten) meldet den Fortschritt."""
     files = list_images(folder)
     emit("start", total=len(files))
@@ -292,7 +369,7 @@ def run_job(folder, dry_run, emit, cancel_event, jobs=0, prefix=""):
     results = {}
     ex = ProcessPoolExecutor(max_workers=jobs)
     try:
-        futs = {ex.submit(find_label, f, prefix): f for f in files}
+        futs = {ex.submit(find_label, f, prefix, debug): f for f in files}
         for fut in as_completed(futs):
             if cancel_event.is_set():
                 break
@@ -771,7 +848,7 @@ def run_gui(folder=None):
     root.mainloop()
 
 
-def run_headless(folder, dry_run, report=None, prefix=""):
+def run_headless(folder, dry_run, report=None, prefix="", debug=False):
     """Ohne Fenster, für automatische Tests."""
     lines, counts = [], {}
 
@@ -780,7 +857,7 @@ def run_headless(folder, dry_run, report=None, prefix=""):
             counts[d["status"]] = counts.get(d["status"], 0) + 1
             lines.append(f"{d['status']}\t{d['old']}\t{d['new']}\t{d['info']}")
 
-    run_job(folder, dry_run, emit, threading.Event(), 0, prefix)
+    run_job(folder, dry_run, emit, threading.Event(), 0, prefix, debug)
     text = "\n".join(lines) + "\n"
     if report:
         with open(report, "w", encoding="utf-8") as fh:
@@ -797,11 +874,12 @@ def main():
     ap.add_argument("--headless", action="store_true", help="ohne Fenster ausführen")
     ap.add_argument("--report", help="Ergebnisliste in diese Datei schreiben (nur mit --headless)")
     ap.add_argument("--prefix", default="", help="Präfix für abgeklebte Labels, z. B. F08482ID00")
+    ap.add_argument("--debug", action="store_true", help="gelesenen OCR-Text bei Fehlschlag ausgeben")
     args = ap.parse_args()
     if args.headless:
         if not args.folder or not os.path.isdir(args.folder):
             return 1
-        return run_headless(args.folder, args.dry_run, args.report, args.prefix.upper())
+        return run_headless(args.folder, args.dry_run, args.report, args.prefix.upper(), args.debug)
     run_gui(args.folder if args.folder and os.path.isdir(args.folder) else None)
     return 0
 
