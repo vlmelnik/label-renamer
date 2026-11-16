@@ -312,7 +312,8 @@ class App:
         NOT_FOUND: "✖ Kein Label",
         DENIED: "⚠ Gesperrt",
     }
-    GREEN, GREEN_FILL = "#2e9e44", "#c7e8ca"
+    ACCENT, ACCENT_FILL = "#57c8ff", "#173847"
+    BG, CARD, MUTED, GRID = "#1c1c1c", "#202020", "#9a9a9a", "#2e2e2e"
 
     def __init__(self, root, folder=None):
         import tkinter as tk
@@ -327,20 +328,26 @@ class App:
         root.title(APP)
         root.minsize(780, 640)
         root.geometry("940x740")
+        try:
+            import sv_ttk
+
+            sv_ttk.set_theme("dark")
+        except Exception:  # noqa: BLE001
+            ttk.Style().theme_use("clam")
         style = ttk.Style()
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
+        root.configure(background=self.BG)
         font = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
         self.font = font
-        style.configure("Title.TLabel", font=(font, 16, "bold"))
+        style.configure("Title.TLabel", font=(font, 18, "bold"))
         style.configure("Big.TLabel", font=(font, 11))
-        style.configure("Muted.TLabel", foreground="#666666")
-        style.configure("Value.TLabel", font=(font, 11, "bold"))
-        style.configure("Accent.TButton", font=(font, 10, "bold"), padding=(20, 6))
-        style.configure("Treeview", rowheight=24)
-        style.configure("green.Horizontal.TProgressbar", background=self.GREEN)
+        style.configure("Muted.TLabel", foreground=self.MUTED)
+        style.configure("Value.TLabel", font=(font, 12, "bold"))
+        style.configure("Accent.TButton", font=(font, 10, "bold"), padding=(26, 7))
+        style.configure("Stop.TButton", font=(font, 10, "bold"), padding=(26, 7))
+        style.configure("Treeview", rowheight=28)
+        style.configure("Treeview.Heading", font=(font, 9, "bold"))
 
-        main = ttk.Frame(root, padding=16)
+        main = ttk.Frame(root, padding=20)
         main.pack(fill="both", expand=True)
 
         ttk.Label(main, text="Fotos nach Labelnummer umbenennen", style="Title.TLabel").pack(anchor="w")
@@ -375,10 +382,10 @@ class App:
         prog.pack(fill="x")
         self.prog_title = ttk.Label(prog, text="Bereit", style="Big.TLabel")
         self.prog_title.pack(anchor="w")
-        self.pbar = ttk.Progressbar(prog, mode="determinate", maximum=1, style="green.Horizontal.TProgressbar")
+        self.pbar = ttk.Progressbar(prog, mode="determinate", maximum=1)
         self.pbar.pack(fill="x", pady=6)
-        self.graph = tk.Canvas(prog, height=96, background="#ffffff",
-                               highlightthickness=1, highlightbackground="#d0d0d0")
+        self.graph = tk.Canvas(prog, height=100, background=self.BG,
+                               highlightthickness=1, highlightbackground=self.GRID)
         self.graph.pack(fill="x")
         self.graph.bind("<Configure>", lambda e: self.draw_graph())
         stats = ttk.Frame(prog)
@@ -407,9 +414,9 @@ class App:
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        for tag, color in ((RENAMED, "#e6f4ea"), (PLANNED, "#e8f0fe"), (UNCHANGED, "#f3f3f3"),
-                           (NOT_FOUND, "#fce8e6"), (DENIED, "#fef7e0"), ("ocr", "#fff4d6")):
-            self.tree.tag_configure(tag, background=color)
+        for tag, color in ((RENAMED, "#6ccb5f"), (PLANNED, "#57c8ff"), (UNCHANGED, "#9a9a9a"),
+                           (NOT_FOUND, "#ff99a4"), (DENIED, "#fce100"), ("ocr", "#ffb86b")):
+            self.tree.tag_configure(tag, foreground=color)
 
         bottom = ttk.Frame(res)
         bottom.pack(fill="x", pady=(8, 0))
@@ -472,7 +479,7 @@ class App:
         self.dry = self.dry_var.get()
         for w in (self.entry, self.browse_btn, self.dry_chk, self.open_btn):
             w.configure(state="disabled")
-        self.start_btn.configure(text="Abbrechen", style="TButton")
+        self.start_btn.configure(text="Abbrechen", style="Stop.TButton")
         self.prog_title.configure(text="Bilder werden gesucht …")
 
         def emit(event, **d):
@@ -542,21 +549,21 @@ class App:
         c.delete("all")
         w, h = max(c.winfo_width(), 50), max(c.winfo_height(), 50)
         for i in range(1, 4):
-            c.create_line(0, h * i / 4, w, h * i / 4, fill="#eeeeee")
+            c.create_line(0, h * i / 4, w, h * i / 4, fill=self.GRID)
         if not self.samples:
-            c.create_text(w / 2, h / 2, text="Geschwindigkeit (Bilder pro Sekunde)", fill="#aaaaaa",
+            c.create_text(w / 2, h / 2, text="Geschwindigkeit (Bilder pro Sekunde)", fill="#6a6a6a",
                           font=(self.font, 9))
             return
         t_max = max(self.samples[-1][0], 10.0)
         r_max = max(max(r for _, r in self.samples) * 1.25, 0.5)
         line = [(t / t_max * w, h - r / r_max * (h - 10)) for t, r in self.samples]
         poly = [(0, h), (0, line[0][1])] + line + [(line[-1][0], h)]
-        c.create_polygon(*[v for p in poly for v in p], fill=self.GREEN_FILL, outline="")
+        c.create_polygon(*[v for p in poly for v in p], fill=self.ACCENT_FILL, outline="")
         if len(line) > 1:
-            c.create_line(*[v for p in line for v in p], fill=self.GREEN, width=2)
+            c.create_line(*[v for p in line for v in p], fill=self.ACCENT, width=2)
         cur = line[-1][1]
-        c.create_line(0, cur, w, cur, fill=self.GREEN, dash=(3, 3))
-        c.create_text(w - 6, max(cur - 9, 10), anchor="e", fill=self.GREEN, font=(self.font, 9, "bold"),
+        c.create_line(0, cur, w, cur, fill=self.ACCENT, dash=(3, 3))
+        c.create_text(w - 6, max(cur - 9, 10), anchor="e", fill=self.ACCENT, font=(self.font, 9, "bold"),
                       text=f"{fmt_num(self.samples[-1][1])} Bilder/s")
 
     def on_phase(self):
@@ -629,6 +636,17 @@ def run_gui(folder=None):
 
     root = tk.Tk()
     App(root, folder)
+    if sys.platform == "win32":
+        try:  # dunkle Titelleiste (Windows 10/11)
+            import ctypes
+
+            root.update()
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            value = ctypes.c_int(1)
+            for attr in (20, 19):
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+        except Exception:  # noqa: BLE001
+            pass
     root.mainloop()
 
 

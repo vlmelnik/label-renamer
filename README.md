@@ -31,7 +31,7 @@ Das Fenster zeigt den Fortschritt mit Geschwindigkeitskurve, Restzeit und Anzahl
 
 ```
 pip install -r requirements.txt pyinstaller
-pyinstaller --onefile --windowed --name LabelRenamer --collect-all zxingcpp --collect-all pillow_heif --collect-all winrt label_renamer.py
+pyinstaller --onefile --windowed --name LabelRenamer --collect-all zxingcpp --collect-all pillow_heif --collect-all winrt --collect-all sv_ttk label_renamer.py
 ```
 
 Bei jedem Push auf `main` baut GitHub Actions die exe, testet QR- und Texterkennung unter Windows und veröffentlicht sie als Release.

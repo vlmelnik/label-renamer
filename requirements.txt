@@ -1,6 +1,7 @@
 zxing-cpp>=2.2
 pillow>=10.0
 pillow-heif>=0.16
+sv-ttk>=2.6
 winrt-runtime>=2.0; sys_platform == "win32"
 winrt-Windows.Foundation>=2.0; sys_platform == "win32"
 winrt-Windows.Foundation.Collections>=2.0; sys_platform == "win32"
