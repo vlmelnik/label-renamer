@@ -1,0 +1,44 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Build
+        run: >
+          pyinstaller --onefile --console --name LabelRenamer
+          --collect-all zxingcpp --collect-all pillow_heif
+          label_renamer.py
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory test | Out-Null
+          Copy-Item tests/sample.jpg test/IMG_0001.jpg
+          ./dist/LabelRenamer.exe test
+          if (-not (Test-Path test/F08874ID0109.jpg)) { Get-ChildItem test; exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LabelRenamer
+          path: dist/LabelRenamer.exe
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LabelRenamer.exe
