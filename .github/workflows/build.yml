@@ -38,7 +38,12 @@ jobs:
           name: LabelRenamer
           path: dist/LabelRenamer.exe
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          name: LabelRenamer ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body: "LabelRenamer.exe herunterladen, doppelklicken, Ordner mit Fotos wählen. Benennt die Fotos nach der Labelnummer im QR-Code um (nur Großbuchstaben und Ziffern)."
           files: dist/LabelRenamer.exe

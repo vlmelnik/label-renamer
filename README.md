@@ -40,4 +40,4 @@ pip install -r requirements.txt pyinstaller
 pyinstaller --onefile --console --name LabelRenamer --collect-all zxingcpp --collect-all pillow_heif label_renamer.py
 ```
 
-Die exe wird bei jedem Tag `v*` automatisch über GitHub Actions gebaut und als Release veröffentlicht.
+Die exe wird bei jedem Push auf `main` automatisch über GitHub Actions gebaut, unter Windows getestet und als Release veröffentlicht.
