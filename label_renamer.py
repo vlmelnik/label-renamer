@@ -125,7 +125,32 @@ def fit_prefix(tok, prefix):
     if sum(h != p for h, p in zip(head, prefix)) > 1:
         return None
     rest = digits_only(tok[n:])
-    return prefix + rest if rest and len(rest) <= 6 else None
+    return prefix + rest if rest and 2 <= len(rest) <= 6 else None
+
+
+def fit_head(tok):
+    """Labelanfang ohne laufende Nummer, z. B. "F084821D0" -> "F08482ID0" (Label mit Trennstrich)."""
+    if 8 <= len(tok) <= 11:
+        fmt = "LDDDDDLL" + "D" * (len(tok) - 8)
+        out = [to_kind(c, k) for c, k in zip(tok, fmt)]
+        if all(out):
+            return "".join(out)
+    return None
+
+
+def same_line(a, b):
+    """Liegt Box b auf derselben Textzeile wie Box a (auch bei gedrehtem Text)?"""
+    import math
+
+    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = a[:4]
+    s1, s2 = (x1 - x0, y1 - y0), (x3 - x0, y3 - y0)
+    axis = s1 if math.hypot(*s1) >= math.hypot(*s2) else s2
+    length, thick = math.hypot(*axis), max(1.0, min(math.hypot(*s1), math.hypot(*s2)))
+    ux, uy = axis[0] / max(length, 1e-6), axis[1] / max(length, 1e-6)
+    ca = (sum(p[0] for p in a[:4]) / 4, sum(p[1] for p in a[:4]) / 4)
+    cb = (sum(p[0] for p in b[:4]) / 4, sum(p[1] for p in b[:4]) / 4)
+    vx, vy = cb[0] - ca[0], cb[1] - ca[1]
+    return abs(vx * uy - vy * ux) < 0.8 * thick and abs(vx * ux + vy * uy) < 2.5 * length
 
 
 def join_prefix(prefix, tok):
@@ -170,16 +195,18 @@ def candidates(text, conf, prefix="", marker_ok=True, min_digits=MIN_MARKER_DIGI
                 add(fixed, conf * (2.0 if fixed == tok else 1.6), "text")
             if prefix:
                 add(fit_prefix(tok, prefix), conf * 1.8, "text")
-                if marker_ok and min_digits <= len(tok) <= len(prefix) + 6:
-                    lab = join_prefix(prefix, tok)
-                    if lab:
-                        pure = tok.isdigit() or tok.startswith(prefix) or any(
-                            prefix.endswith(tok[:k]) and tok[k:].isdigit() for k in range(1, len(tok)))
-                        add(lab, conf * (1.0 if pure else 0.4), "marker")
             elif not fixed and 8 <= len(tok) <= 20:
                 d = sum(c.isdigit() for c in tok)
                 if d >= 3 and len(tok) - d >= 1:
                     add(tok, conf * 0.5, "text")
+    # Marker: nur eine einzeln stehende Zahl, nicht ein Teil von "12283090-03"
+    tok = short.upper().replace("|", "1")
+    if prefix and marker_ok and re.fullmatch(r"[A-Z0-9]+", tok) and min_digits <= len(tok) <= len(prefix) + 6:
+        lab = join_prefix(prefix, tok)
+        if lab:
+            pure = tok.isdigit() or tok.startswith(prefix) or any(
+                prefix.endswith(tok[:k]) and tok[k:].isdigit() for k in range(1, len(tok)))
+            add(lab, conf * (1.0 if pure else 0.4), "marker")
     return out
 
 
@@ -193,12 +220,12 @@ def ocr_engine():
 
 
 def run_ocr(img):
-    """Texterkennung (PP-OCR über RapidOCR). Gibt [(Text, Konfidenz)] zurück."""
+    """Texterkennung (PP-OCR über RapidOCR). Gibt [(Text, Konfidenz, Box)] zurück."""
     import numpy as np
 
     arr = np.ascontiguousarray(np.asarray(img.convert("RGB"))[:, :, ::-1])  # BGR
     res, _ = ocr_engine()(arr)
-    return [(r[1], float(r[2])) for r in (res or [])]
+    return [(r[1], float(r[2]), [tuple(map(float, pt)) for pt in r[0]]) for r in (res or [])]
 
 
 def find_stickers(gray, max_count=4, rgb=None):
@@ -299,22 +326,36 @@ def find_text(path, prefix="", ocr=None, debug=False):
         rgb.thumbnail((OCR_MAX_SIDE, OCR_MAX_SIDE), Image.LANCZOS)
         gray = rgb.convert("L")
     except Exception as e:  # noqa: BLE001
-        return None, f"Bild nicht lesbar: {e}"
+        return None, f"Bild nicht lesbar: {e}", []
 
     votes, kinds, seen = {}, {}, []
 
     def read(name, img):
         items = ocr(img)
         if debug and items:
-            seen.append(f"{name}: " + " | ".join(t for t, _ in items))
+            seen.append(f"{name}: " + " | ".join(it[0] for it in items))
+        heads, numbers = [], []
         # Marker-Zahlen nur, wenn das Textstück allein steht (nicht "S3(2.4mm)" o. ä.)
-        for text, conf in items:
+        for text, conf, *box in items:
+            box = box[0] if box else None
+            compact = re.sub(r"[\s.,'`´·_~|-]", "", text).upper()
+            if box and fit_head(compact):
+                heads.append((fit_head(compact), conf, box))
+            if box and compact.isdigit() and 1 <= len(compact) <= 6:
+                numbers.append((compact, conf, box))
             alone = bool(re.fullmatch(r"[\sA-Za-z0-9.,'`´·_~|-]{2,16}", text.strip())) and not re.search(
                 r"[()（）]|MM|mm", text)
             min_digits = MIN_MARKER_DIGITS_STICKER if name.startswith("etikett") else MIN_MARKER_DIGITS_ANYWHERE
             for label, (weight, kind) in candidates(text, conf, prefix, alone, min_digits).items():
                 votes[label] = votes.get(label, 0) + weight
                 kinds[label] = kind
+        # Label mit Trennstrich: "F08482ID0 | 1638" -> beide Teile auf derselben Zeile zusammensetzen
+        for head, hc, hbox in heads:
+            for num, nc, nbox in numbers:
+                label = head + num
+                if fit_format(label) == label and same_line(hbox, nbox):
+                    votes[label] = votes.get(label, 0) + 2.0 * min(hc, nc)
+                    kinds[label] = "text"
 
     def best():
         if not votes:
@@ -334,21 +375,62 @@ def find_text(path, prefix="", ocr=None, debug=False):
                 read("ganz/90°", rgb.rotate(90, expand=True))
         label, score = best()
     except Exception as e:  # noqa: BLE001
-        return None, f"Texterkennung fehlgeschlagen: {e}"
+        return None, f"Texterkennung fehlgeschlagen: {e}", []
     note = (" [" + " || ".join(seen) + f" → Stimmen: {dict(sorted(votes.items(), key=lambda kv: -kv[1])[:4])}]"
             if debug else "")
+    scored = sorted(((k, v * (1.5 if fit_format(k) == k else 0.5)) for k, v in votes.items()), key=lambda kv: -kv[1])
+    alts = scored[:6]
     if label and score >= 0.4:
-        return label, (PREFIX_HINT if kinds[label] == "marker" else OCR_HINT) + note
+        return label, (PREFIX_HINT if kinds[label] == "marker" else OCR_HINT) + note, alts
     msg = "weder QR-Code, Labeltext noch Marker-Ziffern gefunden" if prefix else "weder QR-Code noch Labeltext gefunden"
-    return None, msg + note
+    return None, msg + note, alts
 
 
 def find_label(path, prefix="", debug=False):
-    """Gibt (Labelnummer oder None, Info) zurück. Läuft in einem eigenen Prozess."""
+    """Gibt (Labelnummer oder None, Info, Alternativen) zurück. Läuft in einem eigenen Prozess."""
     label, info, try_text = find_qr(path)
     if label or not try_text:
-        return label, info
+        return label, info, ([(label, 100.0)] if label else [])
     return find_text(path, prefix, debug=debug)
+
+
+BATCH_HINT = "an die anderen Fotos des Durchgangs angepasst – bitte prüfen"
+
+
+def harmonize(results):
+    """Lernt aus dem ganzen Durchgang: Haben die meisten Labels dieselbe Länge und denselben Anfang,
+    werden Ausreißer durch die beste dazu passende Alternative ersetzt."""
+    from collections import Counter
+
+    labels = [r[0] for r in results.values() if r[0]]
+    if len(labels) < 3:
+        return results
+    length, n_len = Counter(len(l) for l in labels).most_common(1)[0]
+    head = ""
+    for k in range(length - 1, 7, -1):  # längster Anfang, den >= 70 % der Labels teilen
+        cand, n = Counter(l[:k] for l in labels).most_common(1)[0]
+        if n >= 0.7 * len(labels):
+            head = cand
+            break
+    if n_len < 0.6 * len(labels) or not head:
+        return results  # kein klares Muster
+
+    def fits(label):
+        return len(label) == length and label.startswith(head)
+
+    out = {}
+    for f, (label, info, alts) in results.items():
+        if label and fits(label):
+            out[f] = (label, info, alts)
+            continue
+        top = alts[0][1] if alts else 0
+        better = next((a for a, sc in alts if fits(a) and sc >= max(0.25, 0.3 * top)), None)
+        if not better and label and info.startswith(PREFIX_HINT) and len(label) < length and label.startswith(head):
+            rest = label[len(head):]
+            if rest.isdigit():  # Marker ohne führende Nullen: "548" -> "00548"
+                better = head + rest.zfill(length - len(head))
+        out[f] = (better, BATCH_HINT, alts) if better else (label, info, alts)
+    return out
 
 
 # --------------------------------------------------------------------------- Umbenennen
@@ -413,7 +495,7 @@ def run_job(folder, dry_run, emit, cancel_event, jobs=0, prefix="", debug=False)
             try:
                 results[f] = fut.result()
             except Exception as e:  # noqa: BLE001
-                results[f] = (None, str(e))
+                results[f] = (None, str(e), [])
             emit("analyzed", file=f, label=results[f][0], done=len(results),
                  nbytes=os.path.getsize(f) if os.path.exists(f) else 0)
     finally:
@@ -423,10 +505,11 @@ def run_job(folder, dry_run, emit, cancel_event, jobs=0, prefix="", debug=False)
         emit("done", cancelled=True)
         return
 
+    results = harmonize(results)
     emit("phase")
     taken = set()
     for f in files:  # nacheinander, damit Duplikate sauber nummeriert werden
-        lab, info = results[f]
+        lab, info, _ = results[f]
         base = os.path.basename(f)
         if not lab:
             emit("result", old=base, new="", status=NOT_FOUND, info=info)
@@ -806,7 +889,7 @@ class App:
     def on_result(self, old, new, status, info):
         self.counts[status] += 1
         tags = (status,)
-        if info in (OCR_HINT, PREFIX_HINT) and status in (RENAMED, PLANNED):
+        if (info.startswith(OCR_HINT) or info.startswith(PREFIX_HINT) or info == BATCH_HINT) and status in (RENAMED, PLANNED):
             tags = ("ocr",)
         self.tree.insert("", "end", values=(self.STATUS_TEXT[status], old, new or "–", info), tags=tags)
 

@@ -47,7 +47,12 @@ jobs:
           Copy-Item tests/sample_marker_faint.jpg test3/IMG_0004.jpg
           Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test3","--headless","--prefix","F08482ID00","--report","report3.txt","--debug" -Wait
           Get-Content report3.txt
+          New-Item -ItemType Directory test4 | Out-Null
+          Copy-Item tests/sample_split.jpg test4/IMG_0005.jpg
+          Start-Process -FilePath dist/LabelRenamer.exe -ArgumentList "test4","--headless","--report","report4.txt","--debug" -Wait
+          Get-Content report4.txt
           $fail = $false
+          if (-not (Test-Path test4/F08482ID01638.jpg)) { Write-Host "::error::Geteiltes Label (F08482ID0 | 1638) fehlgeschlagen"; $fail = $true }
           if (-not (Test-Path test2/F08482ID00550.jpg)) { Write-Host "::error::Präfix + große Marker-Ziffern fehlgeschlagen"; $fail = $true }
           if (-not (Test-Path test3/F08482ID00532.jpg)) { Write-Host "::error::Präfix + blasse gedrehte Marker-Ziffern fehlgeschlagen"; $fail = $true }
           if ($fail) { exit 1 }
